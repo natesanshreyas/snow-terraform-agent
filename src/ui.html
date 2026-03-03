@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Snow → Terraform Provisioning Agent</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      body { font-family: Arial, sans-serif; margin: 0; padding: 24px; max-width: 980px; background: #f9f9f9; }
+      h1 { margin: 0 0 4px; font-size: 1.5rem; }
+      .subtitle { color: #666; margin: 0 0 24px; font-size: 0.9rem; }
+
+      .card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+      label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 0.875rem; }
+      input, textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 0.95rem; margin-bottom: 12px; }
+      input:focus, textarea:focus { outline: none; border-color: #0078d4; box-shadow: 0 0 0 2px rgba(0,120,212,0.2); }
+
+      .row { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+
+      button#run {
+        display: inline-flex; align-items: center; gap: 8px;
+        background: #0078d4; color: #fff; border: none; border-radius: 6px;
+        padding: 10px 20px; font-size: 0.95rem; cursor: pointer;
+      }
+      button#run:hover { background: #005ea2; }
+      button#run:disabled { background: #999; cursor: not-allowed; }
+
+      #status { margin-top: 12px; font-size: 0.9rem; color: #444; min-height: 20px; }
+
+      .result-section { display: none; }
+      .result-section.visible { display: block; }
+
+      .pr-banner {
+        background: #e6f4ea; border: 1px solid #34a853; border-radius: 8px;
+        padding: 16px; display: flex; align-items: center; gap: 12px;
+        margin-bottom: 16px;
+      }
+      .pr-banner .icon { font-size: 1.4rem; }
+      .pr-banner a { color: #1a73e8; font-weight: 600; text-decoration: none; }
+      .pr-banner a:hover { text-decoration: underline; }
+
+      .blocked-banner {
+        background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px;
+        padding: 16px; margin-bottom: 16px;
+      }
+      .error-banner {
+        background: #fce8e8; border: 1px solid #ea4335; border-radius: 8px;
+        padding: 16px; margin-bottom: 16px;
+      }
+
+      .summary-text { font-size: 0.95rem; color: #333; margin-bottom: 0; }
+
+      details { margin-top: 16px; }
+      summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; color: #0078d4; }
+      pre {
+        white-space: pre-wrap; word-break: break-word;
+        background: #1e1e1e; color: #d4d4d4;
+        padding: 14px; border-radius: 6px;
+        font-size: 0.82rem; line-height: 1.5;
+        max-height: 500px; overflow-y: auto;
+        margin-top: 8px;
+      }
+
+      .badge {
+        display: inline-block; padding: 2px 8px; border-radius: 12px;
+        font-size: 0.78rem; font-weight: 600;
+      }
+      .badge-green  { background: #e6f4ea; color: #1e8e3e; }
+      .badge-yellow { background: #fff3cd; color: #856404; }
+      .badge-blue   { background: #e8f0fe; color: #1a73e8; }
+      .badge-red    { background: #fce8e8; color: #c5221f; }
+
+      .step-list { list-style: none; padding: 0; margin: 0 0 4px; }
+      .step-list li { padding: 6px 0; border-bottom: 1px solid #eee; font-size: 0.85rem; display: flex; align-items: flex-start; gap: 8px; }
+      .step-list li:last-child { border-bottom: none; }
+      .step-icon { flex-shrink: 0; }
+      .step-name { font-family: monospace; color: #0078d4; font-weight: 600; flex-shrink: 0; min-width: 260px; }
+      .step-preview { color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
+
+      /* ── Eval Scores ── */
+      .eval-card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+      .eval-card-header {
+        display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+      }
+      .eval-card-header label { margin: 0; font-size: 1rem; }
+      .eval-verdict {
+        font-size: 0.85rem; font-weight: 700; padding: 4px 12px; border-radius: 20px;
+      }
+      .eval-verdict.pass { background: #e6f4ea; color: #1e8e3e; }
+      .eval-verdict.fail { background: #fce8e8; color: #c5221f; }
+
+      .eval-dims { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+      .eval-dim { text-align: center; }
+      .eval-dim-label { font-size: 0.8rem; font-weight: 600; color: #555; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .score-ring {
+        width: 72px; height: 72px; margin: 0 auto 8px;
+        border-radius: 50%; display: flex; align-items: center; justify-content: center;
+        font-size: 1.5rem; font-weight: 700; border: 5px solid;
+      }
+      .score-ring.high   { border-color: #34a853; color: #1e8e3e; background: #e6f4ea; }
+      .score-ring.medium { border-color: #fbbc04; color: #856404; background: #fff3cd; }
+      .score-ring.low    { border-color: #ea4335; color: #c5221f; background: #fce8e8; }
+      .eval-dim-reason   { font-size: 0.75rem; color: #666; min-height: 36px; }
+
+      .eval-reason-box {
+        margin-top: 14px; padding: 10px 14px; background: #fff3cd;
+        border-left: 4px solid #ffc107; border-radius: 4px;
+        font-size: 0.85rem; color: #333;
+      }
+
+      /* polling progress */
+      .poll-steps { list-style: none; padding: 0; margin: 12px 0 0; }
+      .poll-steps li {
+        padding: 4px 0; font-size: 0.85rem; color: #666;
+        display: flex; align-items: center; gap: 8px;
+      }
+      .poll-steps li.done   { color: #1e8e3e; }
+      .poll-steps li.active { color: #0078d4; font-weight: 600; }
+      .spinner {
+        display: inline-block; width: 14px; height: 14px;
+        border: 2px solid #ccc; border-top-color: #0078d4;
+        border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <h1>Snow → Terraform Provisioning Agent</h1>
+    <p class="subtitle">
+      Reads a ServiceNow ticket, generates Terraform, opens a GitHub PR, and updates the ticket — all via MCP.
+    </p>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label for="ticketId">ServiceNow Ticket ID</label>
+          <input id="ticketId" placeholder="e.g. RITM0001234" />
+        </div>
+        <div>
+          <label for="iterations">Max Iterations</label>
+          <input id="iterations" type="number" min="1" max="20" value="15" />
+        </div>
+      </div>
+
+      <button id="run">
+        <span id="runIcon">&#9654;</span>
+        <span id="runLabel">Run Provisioning</span>
+      </button>
+      <p id="status"></p>
+
+      <!-- Async polling progress -->
+      <ul id="pollSteps" class="poll-steps" style="display:none">
+        <li id="step-queued">  <span>&#9679;</span> Queued in Service Bus</li>
+        <li id="step-running"> <span>&#9679;</span> Worker picked up job</li>
+        <li id="step-eval">    <span>&#9679;</span> Generating &amp; evaluating Terraform</li>
+        <li id="step-pr">      <span>&#9679;</span> Opening GitHub PR</li>
+        <li id="step-done">    <span>&#9679;</span> Ticket updated</li>
+      </ul>
+    </div>
+
+    <!-- Result area -->
+    <div id="resultArea" class="result-section">
+      <div id="prBanner"></div>
+
+      <!-- Eval Scores Card -->
+      <div class="eval-card" id="evalCard" style="display:none">
+        <div class="eval-card-header">
+          <label>AI Quality Evaluation</label>
+          <span id="evalVerdict" class="eval-verdict"></span>
+        </div>
+        <div class="eval-dims">
+          <div class="eval-dim">
+            <div class="eval-dim-label">Security</div>
+            <div id="ringS" class="score-ring">-</div>
+            <div id="reasonS" class="eval-dim-reason"></div>
+          </div>
+          <div class="eval-dim">
+            <div class="eval-dim-label">Compliance</div>
+            <div id="ringC" class="score-ring">-</div>
+            <div id="reasonC" class="eval-dim-reason"></div>
+          </div>
+          <div class="eval-dim">
+            <div class="eval-dim-label">Quality</div>
+            <div id="ringQ" class="score-ring">-</div>
+            <div id="reasonQ" class="eval-dim-reason"></div>
+          </div>
+        </div>
+        <div id="evalReason" class="eval-reason-box" style="display:none"></div>
+      </div>
+
+      <div class="card">
+        <label>Summary</label>
+        <p id="summaryText" class="summary-text"></p>
+        <div id="metaBadges" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;"></div>
+      </div>
+
+      <div class="card" id="traceCard">
+        <label>Tool Trace (<span id="toolCount">0</span> calls)</label>
+        <ul id="stepList" class="step-list"></ul>
+        <details>
+          <summary>Raw JSON trace</summary>
+          <pre id="traceJson"></pre>
+        </details>
+      </div>
+    </div>
+
+    <script>
+      const runBtn     = document.getElementById('run');
+      const runIcon    = document.getElementById('runIcon');
+      const runLabel   = document.getElementById('runLabel');
+      const statusEl   = document.getElementById('status');
+      const resultArea = document.getElementById('resultArea');
+      const prBanner   = document.getElementById('prBanner');
+      const summaryEl  = document.getElementById('summaryText');
+      const metaBadges = document.getElementById('metaBadges');
+      const stepList   = document.getElementById('stepList');
+      const toolCount  = document.getElementById('toolCount');
+      const traceJson  = document.getElementById('traceJson');
+      const pollSteps  = document.getElementById('pollSteps');
+
+      function setRunning(running) {
+        runBtn.disabled = running;
+        runIcon.textContent  = running ? '⏳' : '▶';
+        runLabel.textContent = running ? 'Running…' : 'Run Provisioning';
+      }
+
+      function badge(text, cls) {
+        const s = document.createElement('span');
+        s.className = `badge ${cls}`;
+        s.textContent = text;
+        return s;
+      }
+
+      function serverColor(name) {
+        if (name.startsWith('snow__'))   return '#e8f4fd';
+        if (name.startsWith('github__')) return '#f0f8e8';
+        if (name.startsWith('azure__'))  return '#fdf0e8';
+        return '#f4f4f4';
+      }
+
+      function scoreClass(n) {
+        if (n >= 4) return 'high';
+        if (n === 3) return 'medium';
+        return 'low';
+      }
+
+      function renderEval(ev) {
+        if (!ev) return;
+        document.getElementById('evalCard').style.display = '';
+
+        const verdict = document.getElementById('evalVerdict');
+        verdict.textContent = ev.passed ? '✓ PASSED' : '✗ FAILED';
+        verdict.className = `eval-verdict ${ev.passed ? 'pass' : 'fail'}`;
+
+        [['S', ev.security], ['C', ev.compliance], ['Q', ev.quality]].forEach(([k, v]) => {
+          const ring = document.getElementById(`ring${k}`);
+          ring.textContent = `${v}/5`;
+          ring.className = `score-ring ${scoreClass(v)}`;
+        });
+
+        if (ev.reason) {
+          const box = document.getElementById('evalReason');
+          box.textContent = `⚠ ${ev.reason}`;
+          box.style.display = '';
+        }
+      }
+
+      function advancePollStep(stepId) {
+        ['step-queued','step-running','step-eval','step-pr','step-done'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el.classList.contains('active')) {
+            el.classList.remove('active');
+            el.classList.add('done');
+            el.querySelector('span').textContent = '✓';
+          }
+        });
+        const next = document.getElementById(stepId);
+        if (next) {
+          next.classList.add('active');
+          next.innerHTML = `<span class="spinner"></span> ${next.textContent.trim()}`;
+        }
+      }
+
+      function renderResult(data) {
+        resultArea.classList.add('visible');
+        prBanner.innerHTML = '';
+        metaBadges.innerHTML = '';
+        stepList.innerHTML = '';
+
+        if (data.pr_url) {
+          prBanner.innerHTML = `
+            <div class="pr-banner">
+              <span class="icon">✅</span>
+              <div>
+                <strong>Pull Request created</strong><br>
+                <a href="${data.pr_url}" target="_blank">${data.pr_url}</a>
+              </div>
+            </div>`;
+        }
+
+        summaryEl.textContent = data.summary || '—';
+        if (data.iterations) metaBadges.appendChild(badge(`${data.iterations} iteration(s)`, 'badge-blue'));
+        metaBadges.appendChild(badge(data.ticket_updated ? 'Ticket updated ✓' : 'Ticket not updated', data.ticket_updated ? 'badge-green' : 'badge-yellow'));
+
+        renderEval(data.eval_scores);
+
+        const calls = data.tool_calls || [];
+        toolCount.textContent = calls.length;
+        if (calls.length === 0) {
+          document.getElementById('traceCard').style.display = 'none';
+        } else {
+          calls.forEach(tc => {
+            const li = document.createElement('li');
+            const icon = tc.name.startsWith('[') ? '⚙️' : '🔧';
+            li.innerHTML = `
+              <span class="step-icon">${icon}</span>
+              <span class="step-name" style="background:${serverColor(tc.name)};padding:1px 6px;border-radius:4px">${tc.name}</span>
+              <span class="step-preview">${tc.result_preview.replace(/</g,'&lt;').substring(0, 120)}</span>`;
+            stepList.appendChild(li);
+          });
+          traceJson.textContent = JSON.stringify(calls, null, 2);
+        }
+      }
+
+      async function pollStatus(runId) {
+        const MAX_POLLS = 60;   // 5 min at 5s intervals
+        for (let i = 0; i < MAX_POLLS; i++) {
+          await new Promise(r => setTimeout(r, 5000));
+          try {
+            const r = await fetch(`/api/provision/${runId}/status`);
+            if (!r.ok) continue;
+            const data = await r.json();
+            const st = data.status;
+
+            if (st === 'running') {
+              advancePollStep('step-running');
+              statusEl.textContent = 'Worker is running the agent…';
+            } else if (st === 'completed') {
+              advancePollStep('step-done');
+              // Mark all remaining steps done
+              ['step-queued','step-running','step-eval','step-pr','step-done'].forEach(id => {
+                const el = document.getElementById(id);
+                if (!el.classList.contains('done')) {
+                  el.classList.remove('active');
+                  el.classList.add('done');
+                  el.innerHTML = `<span>✓</span> ${el.textContent.replace(/[⏳✓]/g,'').trim()}`;
+                }
+              });
+              renderResult(data);
+              statusEl.textContent = `Completed in ${data.iterations || '?'} iteration(s).`;
+              setRunning(false);
+              return;
+            } else if (st === 'failed') {
+              prBanner.innerHTML = `<div class="error-banner">❌ <strong>Failed:</strong> ${data.error || 'Unknown error'}</div>`;
+              resultArea.classList.add('visible');
+              statusEl.textContent = 'Provisioning failed.';
+              setRunning(false);
+              return;
+            }
+          } catch (_) { /* ignore transient network errors */ }
+        }
+        statusEl.textContent = '⚠ Timed out polling for status. Check Container Apps logs.';
+        setRunning(false);
+      }
+
+      runBtn.addEventListener('click', async () => {
+        const ticketId = document.getElementById('ticketId').value.trim();
+        if (!ticketId) { statusEl.textContent = '⚠️ Enter a ServiceNow ticket ID.'; return; }
+
+        setRunning(true);
+        statusEl.textContent = 'Submitting provisioning request…';
+        resultArea.classList.remove('visible');
+        prBanner.innerHTML = '';
+        document.getElementById('evalCard').style.display = 'none';
+        document.getElementById('traceCard').style.display = '';
+        pollSteps.style.display = 'none';
+
+        try {
+          const resp = await fetch('/api/provision', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ticket_id: ticketId,
+              max_iterations: Number(document.getElementById('iterations').value || 15),
+            }),
+          });
+
+          const payload = await resp.json();
+
+          // ── Async mode (202) ────────────────────────────────────────────────
+          if (resp.status === 202) {
+            const runId = payload.run_id;
+            pollSteps.style.display = '';
+            advancePollStep('step-queued');
+            statusEl.textContent = `Queued (run ${runId.substring(0,8)}…). Polling for updates every 5s…`;
+            // After ~5s advance to "running" optimistically
+            setTimeout(() => advancePollStep('step-running'), 6000);
+            setTimeout(() => advancePollStep('step-eval'), 20000);
+            await pollStatus(runId);
+            return;
+          }
+
+          // ── Sync fallback (200) ─────────────────────────────────────────────
+          if (!resp.ok) {
+            const detail = payload.detail || 'Request failed';
+            if (detail.toLowerCase().includes('blocked') || detail.toLowerCase().includes('not approved')) {
+              prBanner.innerHTML = `<div class="blocked-banner">⚠️ <strong>Blocked:</strong> ${detail}</div>`;
+              resultArea.classList.add('visible');
+              summaryEl.textContent = detail;
+              statusEl.textContent = 'Provisioning blocked.';
+            } else {
+              prBanner.innerHTML = `<div class="error-banner">❌ <strong>Error:</strong> ${detail}</div>`;
+              resultArea.classList.add('visible');
+              summaryEl.textContent = '';
+              statusEl.textContent = 'Provisioning failed.';
+            }
+            return;
+          }
+
+          renderResult(payload);
+          statusEl.textContent = `Done in ${payload.iterations} iteration(s).`;
+        } catch (err) {
+          statusEl.textContent = `❌ Network error: ${err.message}`;
+        } finally {
+          // setRunning(false) handled by pollStatus for async; handled here for sync
+          if (resp && resp.status !== 202) setRunning(false);
+        }
+      });
+    </script>
+  </body>
+</html>
