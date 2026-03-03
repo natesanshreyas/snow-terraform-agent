@@ -7,49 +7,77 @@ pull request, and updates the ticket — all orchestrated via three MCP servers.
 
 ## Architecture
 
-```
-ServiceNow ticket (RITM)
-        │
-        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  APIM Gateway  (auth, rate limiting, routing)           │
-  └─────────────────────┬───────────────────────────────────┘
-                        │
-                        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  Azure Service Bus  (queue message with ticket ID)      │
-  └─────────────────────┬───────────────────────────────────┘
-                        │
-                        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  ASB Consumer  (worker process picks up message)        │
-  │  Blob State Store  (tracks job status)                  │
-  └─────────────────────┬───────────────────────────────────┘
-                        │
-                        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  Provisioning Agent  (LLM reasoning loop)               │
-  │                                                         │
-  │  [snow MCP]   → read ticket, validate, update w/ PR URL │
-  │  [azure MCP]  → inventory resource groups (naming)      │
-  │  [github MCP] → find repo → read .tf examples           │
-  │                → create branch → push HCL → open PR     │
-  └─────────────────────┬───────────────────────────────────┘
-                        │
-                        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  Terraform Evaluator  (3 LLM judges)                    │
-  │  Security │ Compliance │ Quality  — each scores 1-5     │
-  │  Pass threshold ≥ 3  │  Up to 2 retries on failure      │
-  └─────────────────────┬───────────────────────────────────┘
-                        │
-                        ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  App Insights  (telemetry + evaluation scores)          │
-  └─────────────────────────────────────────────────────────┘
-                        │
-                        ▼
-   GitHub PR + SNOW work note  →  Awaiting human review
+```mermaid
+flowchart TD
+    subgraph CLIENTS["Clients"]
+        BROWSER(["Browser UI"])
+        WEBHOOK(["ServiceNow Webhook"])
+    end
+
+    subgraph APIM_BOX["Azure API Management\n(Consumption · rate limit 30 req/60s)"]
+        APIM["snow-tf-agent-apim"]
+    end
+
+    subgraph API_APP["ACA: snow-tf-agent-api  (FastAPI · min 1 / max 3)"]
+        PROVISION["POST /api/provision\n{ ticket_id }"]
+        STATUS_EP["GET /api/provision/{run_id}/status"]
+        BLOB_R["read_run()"]
+    end
+
+    subgraph QUEUE["Azure Service Bus"]
+        ASB_Q["provisioning-queue\n{ run_id, ticket_id }"]
+    end
+
+    subgraph WORKER_APP["ACA: snow-tf-agent-worker  (min 1 / max 5 · KEDA scaler)"]
+        CONSUMER["asb_consumer.py\nreceive → running → complete/fail"]
+
+        subgraph AGENT["provisioning_agent.py — LLM Loop (up to 15 iterations)"]
+            AOAI["Azure OpenAI\ngpt-4.1-nano"]
+            AG_STEPS["1  read SNOW ticket\n2  validate approval_state\n3  list Azure resource groups\n4  read .tf example from repo\n5  generate main.tf + variables.tf"]
+        end
+
+        subgraph EVAL["terraform_evaluator.py"]
+            JUDGES["3 LLM Judges\nsecurity · compliance · quality\nscore 1–5  |  pass ≥ 3\nup to 2 retries on fail"]
+        end
+
+        subgraph MCPS["MultiMCPClient  (3 servers started in parallel)"]
+            SNOW_MCP["snow MCP\nservicenow-mcp-server"]
+            GH_MCP["github MCP\n@modelcontextprotocol/server-github"]
+            AZ_MCP["azure MCP\n@azure/mcp"]
+        end
+    end
+
+    subgraph EXT["External Services"]
+        SNOW_SVC["ServiceNow Instance\nread ticket · add work note"]
+        GITHUB_SVC["GitHub\ncreate branch · push HCL · open PR"]
+        ARM["Azure Resource Manager\nlist resource groups"]
+    end
+
+    subgraph STATE["State & Observability"]
+        BLOB["Blob Storage\nruns/{run_id}.json\nqueued → running → completed\n+ pr_url · eval_scores"]
+        APPINS["App Insights\nprovision_run spans\neval scores · MCP tool traces"]
+    end
+
+    BROWSER --> APIM
+    WEBHOOK --> APIM
+    APIM --> PROVISION
+    PROVISION -->|"write status:queued\n202 { run_id }"| BLOB
+    PROVISION -->|"enqueue"| ASB_Q
+    ASB_Q -->|"receive"| CONSUMER
+    CONSUMER -->|"write status:running"| BLOB
+    CONSUMER --> AOAI
+    AOAI <-->|"snow__ · github__ · azure__ tool calls"| MCPS
+    SNOW_MCP <--> SNOW_SVC
+    GH_MCP <--> GITHUB_SVC
+    AZ_MCP <--> ARM
+    AG_STEPS -->|"generated HCL"| JUDGES
+    JUDGES -->|"score < 3: inject feedback"| AOAI
+    JUDGES -->|"passed: push HCL, open PR, update ticket"| GH_MCP
+    CONSUMER -->|"write status:completed\npr_url · eval_scores"| BLOB
+    CONSUMER -->|"telemetry"| APPINS
+    STATUS_EP --> BLOB_R
+    BLOB_R --> BLOB
+    STATUS_EP -->|"{ status · pr_url · eval_scores }"| BROWSER
 ```
 
 ### MCP Servers
