@@ -5,21 +5,49 @@
 # Run each section in order.  Steps that create resources can take 1-5 minutes.
 # Prerequisites:
 #   az login (or Cloud Shell)
-#   docker + az acr login available on the machine
+#   docker available on the machine (for step 1.12)
+#   Node 20+ and npm available (for servicenow-mcp-server in Docker build)
 # =============================================================================
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# 1.1  Variables
+# CONFIGURE THESE before running
 # ---------------------------------------------------------------------------
-az account set --subscription "ME-MngEnvMCAP025145-snatesan-1"
-
-SUFFIX="sn2025"
-RG="snow-tf-agent-rg"
+SUBSCRIPTION="<your-subscription-name-or-id>"   # e.g. "My Azure Subscription"
+SUFFIX="<your-unique-suffix>"                    # e.g. "contoso25" — used for storage/ACR/KV names
+                                                 # must be globally unique, lowercase alphanumeric only
 LOCATION="eastus2"
 
-echo "==> Using: RG=$RG  LOCATION=$LOCATION  SUFFIX=$SUFFIX"
+AOAI_ENDPOINT="https://<your-resource>.<region>.openai.azure.com/"
+AOAI_DEPLOYMENT="gpt-4.1-nano"                  # your deployed model name
+
+SERVICENOW_INSTANCE="https://devXXXXXX.service-now.com"
+SERVICENOW_USERNAME="admin"
+# Export credentials before running:
+#   export SERVICENOW_PASSWORD="your-snow-password"
+#   export GITHUB_PAT="ghp_..."
+
+GITHUB_ORG="<your-github-org-or-username>"
+GITHUB_TERRAFORM_REPO="terraform-modules-demo"  # repo that contains modules/ and examples/
+
+PUBLISHER_EMAIL="<your-email@domain.com>"       # used by APIM
+# ---------------------------------------------------------------------------
+
+RG="snow-tf-agent-rg"
+STORAGE_ACCOUNT="snowtfagent${SUFFIX}"          # 3-24 lowercase alphanumeric, globally unique
+ACR_NAME="snowtfagent${SUFFIX}"
+KV_NAME="snow-tf-kv-${SUFFIX}"
+IMAGE="${ACR_NAME}.azurecr.io/snow-tf-agent:latest"
+
+# Validate required exports
+: "${SERVICENOW_PASSWORD:?'Export SERVICENOW_PASSWORD before running'}"
+: "${GITHUB_PAT:?'Export GITHUB_PAT before running'}"
+
+SUBSCRIPTION_ID=$(az account show --subscription "$SUBSCRIPTION" --query id -o tsv)
+az account set --subscription "$SUBSCRIPTION_ID"
+
+echo "==> Using: SUBSCRIPTION=$SUBSCRIPTION_ID  RG=$RG  LOCATION=$LOCATION  SUFFIX=$SUFFIX"
 
 # ---------------------------------------------------------------------------
 # 1.2  Resource Group
@@ -85,7 +113,7 @@ SB_CONN_STR=$(az servicebus namespace authorization-rule keys list \
 # 1.6  Storage Account + container
 # ---------------------------------------------------------------------------
 az storage account create \
-  --name "snowtfagentsn2025" \
+  --name "$STORAGE_ACCOUNT" \
   --resource-group "$RG" \
   --location "$LOCATION" \
   --sku Standard_LRS \
@@ -94,19 +122,19 @@ az storage account create \
   --min-tls-version TLS1_2
 
 STORAGE_KEY=$(az storage account keys list \
-  --account-name "snowtfagentsn2025" --resource-group "$RG" \
+  --account-name "$STORAGE_ACCOUNT" --resource-group "$RG" \
   --query "[0].value" -o tsv)
 
 az storage container create \
   --name "runs" \
-  --account-name "snowtfagentsn2025" \
+  --account-name "$STORAGE_ACCOUNT" \
   --account-key "$STORAGE_KEY"
 
 # ---------------------------------------------------------------------------
 # 1.7  Container Registry
 # ---------------------------------------------------------------------------
 az acr create \
-  --name "snowtfagentsn2025" \
+  --name "$ACR_NAME" \
   --resource-group "$RG" \
   --location "$LOCATION" \
   --sku Basic \
@@ -131,13 +159,13 @@ MI_RESOURCE_ID=$(az identity show --name "snow-tf-agent-identity" \
 # 1.9  Key Vault + secrets
 # ---------------------------------------------------------------------------
 az keyvault create \
-  --name "snow-tf-kv-sn2025" \
+  --name "$KV_NAME" \
   --resource-group "$RG" \
   --location "$LOCATION" \
   --sku standard \
   --enable-rbac-authorization true
 
-KV_ID=$(az keyvault show --name "snow-tf-kv-sn2025" \
+KV_ID=$(az keyvault show --name "$KV_NAME" \
   --resource-group "$RG" --query id -o tsv)
 
 MY_OBJ_ID=$(az ad signed-in-user show --query id -o tsv)
@@ -150,12 +178,10 @@ az role assignment create \
 echo "Waiting 30s for Key Vault RBAC propagation..."
 sleep 30
 
-az keyvault secret set --vault-name "snow-tf-kv-sn2025" \
-  --name "snow-password" --value "WicRu-Nz7%L1"
-az keyvault secret set --vault-name "snow-tf-kv-sn2025" \
-  --name "github-pat" --value "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"
-# Note: App Insights connection string is no longer a secret — telemetry is
-# bootstrapped via the Foundry project connection string (plain env var).
+az keyvault secret set --vault-name "$KV_NAME" \
+  --name "snow-password" --value "$SERVICENOW_PASSWORD"
+az keyvault secret set --vault-name "$KV_NAME" \
+  --name "github-pat" --value "$GITHUB_PAT"
 
 # ---------------------------------------------------------------------------
 # 1.10  RBAC role assignments for Managed Identity
@@ -165,7 +191,7 @@ az role assignment create \
   --assignee "$MI_PRINCIPAL_ID" \
   --scope "$KV_ID"
 
-STORAGE_ID=$(az storage account show --name "snowtfagentsn2025" \
+STORAGE_ID=$(az storage account show --name "$STORAGE_ACCOUNT" \
   --resource-group "$RG" --query id -o tsv)
 az role assignment create \
   --role "Storage Blob Data Contributor" \
@@ -179,19 +205,21 @@ az role assignment create \
   --assignee "$MI_PRINCIPAL_ID" \
   --scope "$SB_NS_ID"
 
-# Azure OpenAI — discover resource ID from the known endpoint hostname
+# Azure OpenAI — find the resource by matching its endpoint hostname
+AOAI_HOSTNAME=$(echo "$AOAI_ENDPOINT" | sed 's|https://||' | sed 's|/.*||')
 AOAI_ID=$(az cognitiveservices account list \
-  --query "[?contains(properties.endpoint,'snate-mkpwns1j-eastus2')].id | [0]" -o tsv)
+  --query "[?contains(properties.endpoint,'$AOAI_HOSTNAME')].id | [0]" -o tsv)
 if [ -n "$AOAI_ID" ]; then
   az role assignment create \
     --role "Cognitive Services OpenAI User" \
     --assignee "$MI_PRINCIPAL_ID" \
     --scope "$AOAI_ID"
 else
-  echo "WARNING: Could not find AOAI resource. Assign 'Cognitive Services OpenAI User' manually."
+  echo "WARNING: Could not find Azure OpenAI resource for endpoint '$AOAI_ENDPOINT'."
+  echo "         Manually assign 'Cognitive Services OpenAI User' to $MI_PRINCIPAL_ID."
 fi
 
-ACR_ID=$(az acr show --name "snowtfagentsn2025" \
+ACR_ID=$(az acr show --name "$ACR_NAME" \
   --resource-group "$RG" --query id -o tsv)
 az role assignment create \
   --role "AcrPull" \
@@ -209,7 +237,10 @@ az containerapp env create \
   --logs-workspace-key "$LOG_WS_KEY"
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Azure AI Foundry Hub + Project (for eval logging + tracing)
+# Phase 3 — Azure AI Foundry Hub + Project (optional, for eval logging)
+# ---------------------------------------------------------------------------
+# Skip this section if your subscription policy blocks ML workspaces with
+# publicNetworkAccess:Enabled — eval scores will still appear in App Insights.
 # ---------------------------------------------------------------------------
 az extension add --name ml --yes 2>/dev/null || true
 
@@ -218,11 +249,10 @@ az ml workspace create \
   --resource-group "$RG" \
   --name "snow-tf-agent-hub" \
   --location "$LOCATION" \
-  --storage-account "snowtfagentsn2025" \
+  --storage-account "$STORAGE_ACCOUNT" \
   --application-insights "snow-tf-agent-ai"
 
-SUBSCRIPTION_ID="68837237-5a48-41a9-bed4-947f5c277684"
-HUB_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG/providers/Microsoft.MachineLearningServices/workspaces/snow-tf-agent-hub"
+HUB_ID="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RG}/providers/Microsoft.MachineLearningServices/workspaces/snow-tf-agent-hub"
 
 az ml workspace create \
   --kind project \
@@ -250,11 +280,12 @@ az role assignment create \
 # 1.12  Build & push Docker image
 # ---------------------------------------------------------------------------
 echo ""
-echo "==> Building and pushing Docker image (running now)..."
-cd /home/snatesan/WorkbenchIQ-new/snow-terraform-agent
-az acr login --name snowtfagentsn2025
-docker build -t snowtfagentsn2025.azurecr.io/snow-tf-agent:latest .
-docker push snowtfagentsn2025.azurecr.io/snow-tf-agent:latest
+echo "==> Building and pushing Docker image..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+az acr login --name "$ACR_NAME"
+docker build -t "$IMAGE" .
+docker push "$IMAGE"
 cd -
 
 # ---------------------------------------------------------------------------
@@ -264,8 +295,8 @@ az containerapp create \
   --name "snow-tf-agent-api" \
   --resource-group "$RG" \
   --environment "snow-tf-agent-env" \
-  --image "snowtfagentsn2025.azurecr.io/snow-tf-agent:latest" \
-  --registry-server "snowtfagentsn2025.azurecr.io" \
+  --image "$IMAGE" \
+  --registry-server "${ACR_NAME}.azurecr.io" \
   --registry-identity "$MI_RESOURCE_ID" \
   --user-assigned "$MI_RESOURCE_ID" \
   --target-port 8000 \
@@ -273,26 +304,26 @@ az containerapp create \
   --min-replicas 1 --max-replicas 3 \
   --cpu 0.5 --memory 1.0Gi \
   --secrets \
-    "snow-password=keyvaultref:https://snow-tf-kv-sn2025.vault.azure.net/secrets/snow-password,identityref:$MI_RESOURCE_ID" \
-    "github-pat=keyvaultref:https://snow-tf-kv-sn2025.vault.azure.net/secrets/github-pat,identityref:$MI_RESOURCE_ID" \
+    "snow-password=keyvaultref:https://${KV_NAME}.vault.azure.net/secrets/snow-password,identityref:${MI_RESOURCE_ID}" \
+    "github-pat=keyvaultref:https://${KV_NAME}.vault.azure.net/secrets/github-pat,identityref:${MI_RESOURCE_ID}" \
   --env-vars \
     "AZURE_CLIENT_ID=$MI_CLIENT_ID" \
-    "AZURE_OPENAI_ENDPOINT=https://snate-mkpwns1j-eastus2.openai.azure.com/" \
-    "AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4.1-nano" \
+    "AZURE_OPENAI_ENDPOINT=$AOAI_ENDPOINT" \
+    "AZURE_OPENAI_DEPLOYMENT_NAME=$AOAI_DEPLOYMENT" \
     "AZURE_OPENAI_API_VERSION=2024-10-21" \
     "AZURE_OPENAI_USE_AZURE_AD=true" \
-    "AZURE_SERVICE_BUS_HOSTNAME=snowtfagentbus.servicebus.windows.net" \
+    "AZURE_SERVICE_BUS_HOSTNAME=snow-tf-agent-sb.servicebus.windows.net" \
     "AZURE_SERVICE_BUS_QUEUE_NAME=provisioning-queue" \
-    "AZURE_STORAGE_ACCOUNT_NAME=snowtfagentsn2025" \
+    "AZURE_STORAGE_ACCOUNT_NAME=$STORAGE_ACCOUNT" \
     "AZURE_STORAGE_CONTAINER_NAME=runs" \
-    "SERVICENOW_INSTANCE_URL=https://dev353389.service-now.com" \
-    "SERVICENOW_USERNAME=admin" \
-    "GITHUB_ORG=natesanshreyas" \
-    "GITHUB_TERRAFORM_REPO=terraform-modules-demo" \
-    "AZURE_SUBSCRIPTION_ID=68837237-5a48-41a9-bed4-947f5c277684" \
+    "SERVICENOW_INSTANCE_URL=$SERVICENOW_INSTANCE" \
+    "SERVICENOW_USERNAME=$SERVICENOW_USERNAME" \
+    "GITHUB_ORG=$GITHUB_ORG" \
+    "GITHUB_TERRAFORM_REPO=$GITHUB_TERRAFORM_REPO" \
+    "AZURE_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" \
     "SNOW_MCP_COMMAND=servicenow-mcp-server" \
     "GITHUB_MCP_COMMAND=npx @modelcontextprotocol/server-github" \
-    "AZURE_AI_FOUNDRY_PROJECT_CONNECTION_STRING=$FOUNDRY_CONN_STR" \
+    "APPLICATIONINSIGHTS_CONNECTION_STRING=$AI_CONN_STR" \
     "SERVICENOW_PASSWORD=secretref:snow-password" \
     "GITHUB_PERSONAL_ACCESS_TOKEN=secretref:github-pat"
 
@@ -309,38 +340,37 @@ az containerapp create \
   --name "snow-tf-agent-worker" \
   --resource-group "$RG" \
   --environment "snow-tf-agent-env" \
-  --image "snowtfagentsn2025.azurecr.io/snow-tf-agent:latest" \
-  --registry-server "snowtfagentsn2025.azurecr.io" \
+  --image "$IMAGE" \
+  --registry-server "${ACR_NAME}.azurecr.io" \
   --registry-identity "$MI_RESOURCE_ID" \
   --user-assigned "$MI_RESOURCE_ID" \
   --ingress disabled \
-  --min-replicas 0 --max-replicas 5 \
+  --min-replicas 1 --max-replicas 5 \
   --cpu 1.0 --memory 2.0Gi \
   --command "python" \
   --args "-m,src.asb_consumer" \
   --secrets \
-    "snow-password=keyvaultref:https://snow-tf-kv-sn2025.vault.azure.net/secrets/snow-password,identityref:$MI_RESOURCE_ID" \
-    "github-pat=keyvaultref:https://snow-tf-kv-sn2025.vault.azure.net/secrets/github-pat,identityref:$MI_RESOURCE_ID" \
-    "asb-connection-string=$SB_CONN_STR" \
+    "snow-password=keyvaultref:https://${KV_NAME}.vault.azure.net/secrets/snow-password,identityref:${MI_RESOURCE_ID}" \
+    "github-pat=keyvaultref:https://${KV_NAME}.vault.azure.net/secrets/github-pat,identityref:${MI_RESOURCE_ID}" \
     "asb-connection-string=$SB_CONN_STR" \
   --env-vars \
     "AZURE_CLIENT_ID=$MI_CLIENT_ID" \
-    "AZURE_OPENAI_ENDPOINT=https://snate-mkpwns1j-eastus2.openai.azure.com/" \
-    "AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4.1-nano" \
+    "AZURE_OPENAI_ENDPOINT=$AOAI_ENDPOINT" \
+    "AZURE_OPENAI_DEPLOYMENT_NAME=$AOAI_DEPLOYMENT" \
     "AZURE_OPENAI_API_VERSION=2024-10-21" \
     "AZURE_OPENAI_USE_AZURE_AD=true" \
-    "AZURE_SERVICE_BUS_HOSTNAME=snowtfagentbus.servicebus.windows.net" \
+    "AZURE_SERVICE_BUS_HOSTNAME=snow-tf-agent-sb.servicebus.windows.net" \
     "AZURE_SERVICE_BUS_QUEUE_NAME=provisioning-queue" \
-    "AZURE_STORAGE_ACCOUNT_NAME=snowtfagentsn2025" \
+    "AZURE_STORAGE_ACCOUNT_NAME=$STORAGE_ACCOUNT" \
     "AZURE_STORAGE_CONTAINER_NAME=runs" \
-    "SERVICENOW_INSTANCE_URL=https://dev353389.service-now.com" \
-    "SERVICENOW_USERNAME=admin" \
-    "GITHUB_ORG=natesanshreyas" \
-    "GITHUB_TERRAFORM_REPO=terraform-modules-demo" \
-    "AZURE_SUBSCRIPTION_ID=68837237-5a48-41a9-bed4-947f5c277684" \
+    "SERVICENOW_INSTANCE_URL=$SERVICENOW_INSTANCE" \
+    "SERVICENOW_USERNAME=$SERVICENOW_USERNAME" \
+    "GITHUB_ORG=$GITHUB_ORG" \
+    "GITHUB_TERRAFORM_REPO=$GITHUB_TERRAFORM_REPO" \
+    "AZURE_SUBSCRIPTION_ID=$SUBSCRIPTION_ID" \
     "SNOW_MCP_COMMAND=servicenow-mcp-server" \
     "GITHUB_MCP_COMMAND=npx @modelcontextprotocol/server-github" \
-    "AZURE_AI_FOUNDRY_PROJECT_CONNECTION_STRING=$FOUNDRY_CONN_STR" \
+    "APPLICATIONINSIGHTS_CONNECTION_STRING=$AI_CONN_STR" \
     "SERVICENOW_PASSWORD=secretref:snow-password" \
     "GITHUB_PERSONAL_ACCESS_TOKEN=secretref:github-pat"
 
@@ -388,7 +418,7 @@ az apim create \
   --resource-group "$RG" \
   --location "$LOCATION" \
   --sku-name Consumption \
-  --publisher-email "snatesan@microsoft.com" \
+  --publisher-email "$PUBLISHER_EMAIL" \
   --publisher-name "SnowTFAgent" \
   --no-wait
 
@@ -478,10 +508,10 @@ echo ""
 echo "# Submit provisioning request"
 echo "RESP=\$(curl -s -X POST -H 'Content-Type: application/json' \\"
 echo "  -H 'Ocp-Apim-Subscription-Key: $APIM_KEY' \\"
-echo "  -d '{\"ticket_id\":\"RITM0010003\"}' '$APIM_GW/v1/api/provision')"
+echo "  -d '{\"ticket_id\":\"RITM0001234\"}' '$APIM_GW/v1/api/provision')"
 echo "echo \$RESP"
 echo "RUN_ID=\$(echo \$RESP | python3 -c \"import sys,json; print(json.load(sys.stdin)['run_id'])\")"
 echo ""
-echo "# Poll status (worker scales 0→1 within ~30s after message enqueue)"
+echo "# Poll status (worker picks up within ~30s of message enqueue)"
 echo "curl -H 'Ocp-Apim-Subscription-Key: $APIM_KEY' \\"
 echo "  '$APIM_GW/v1/api/provision/\$RUN_ID/status'"

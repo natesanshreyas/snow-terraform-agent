@@ -45,7 +45,7 @@ ServiceNow ticket (RITM)
                         │
                         ▼
   ┌─────────────────────────────────────────────────────────┐
-  │  Azure AI Foundry  (telemetry + evaluation logging)     │
+  │  App Insights  (telemetry + evaluation scores)          │
   └─────────────────────────────────────────────────────────┘
                         │
                         ▼
@@ -60,16 +60,25 @@ Three MCP servers are started simultaneously at request time:
 |---|---|---|
 | `snow` | `npx -y @servicenow/now-ai-kit@latest` | Read/update SNOW records |
 | `github` | `npx -y @modelcontextprotocol/server-github` | Repo, files, branches, PRs |
-| `azure` | `@azure/mcp` (see env) | Azure resource inventory |
+| `azure` | `npx -y @azure/mcp@latest server start` | Azure resource inventory |
 
 ### Dual Execution Modes
 
 | Mode | Trigger | How it works |
 |---|---|---|
-| **Async** (production) | `POST /api/provision` when ASB is configured | Enqueues to Azure Service Bus → ASB Consumer picks up → runs agent → stores result in Blob |
-| **Sync** (development) | `POST /api/provision` when ASB is not configured | Runs agent inline and returns result directly |
+| **Async** (production) | `POST /api/provision` when `AZURE_SERVICE_BUS_HOSTNAME` is set | Enqueues to Azure Service Bus → ASB Consumer picks up → runs agent → stores result in Blob Storage |
+| **Sync** (development) | `POST /api/provision` without ASB configured | Runs agent inline and returns result directly |
 
-## Quick Start
+## Prerequisites
+
+- Python 3.11+
+- Node 20+ and npm (for MCP server packages)
+- A [ServiceNow developer instance](https://developer.servicenow.com) (free)
+- A GitHub org/account with a Terraform modules repo (see [Demo Terraform Repo](#demo-terraform-repo) below)
+- An Azure OpenAI deployment with a chat model (e.g. `gpt-4.1-nano`, `gpt-4o`)
+- An Azure subscription (for production ACA deployment — not needed for local sync mode)
+
+## Quick Start (local / sync mode)
 
 ```bash
 cd snow-terraform-agent
@@ -86,19 +95,33 @@ uvicorn src.main:app --host 0.0.0.0 --port 8020 --reload
 
 Open **http://localhost:8020** in a browser, enter a ServiceNow RITM number, and click **Run Provisioning**.
 
+## Production Deployment (Azure)
+
+```bash
+# 1. Edit infra/setup.sh — fill in the CONFIGURE THESE block at the top
+# 2. Export secrets:
+export SERVICENOW_PASSWORD="your-snow-password"
+export GITHUB_PAT="ghp_..."
+
+# 3. Run the setup script (~15 min)
+bash infra/setup.sh
+```
+
+The script provisions: Resource Group, Log Analytics, App Insights, Service Bus, Blob Storage, ACR, Managed Identity, Key Vault, ACA Environment, ACA API + Worker apps, KEDA scaler, and APIM gateway.
+
 ## API
 
 ```
 POST /api/provision
   Body: {"ticket_id": "RITM0001234", "max_iterations": 15}
-  Async mode → {"job_id": "...", "status": "queued"}
+  Async mode → {"run_id": "...", "ticket_id": "...", "status": "queued"}
   Sync mode  → {"ticket_id": "...", "pr_url": "...", "summary": "...", ...}
 
-GET  /api/provision/{job_id}/status
-  Returns: {"status": "running|completed|failed", "result": {...}}
+GET  /api/provision/{run_id}/status
+  Returns: {"status": "running|completed|failed", "pr_url": "...", "eval_scores": {...}}
 
 GET  /health  →  {"status": "ok"}
-GET  /        →  UI (ui.html)
+GET  /        →  browser UI
 ```
 
 ## Workflow
@@ -106,7 +129,7 @@ GET  /        →  UI (ui.html)
 1. `snow__*` — read ticket: extract `short_description`, `approval_state`, `cost_center`
 2. Validate `approval_state == "approved"` — returns `blocked` if not
 3. `azure__*` — list resource groups for naming context
-4. `github__*` — find the `terraform-modules-demo` repository
+4. `github__*` — find the Terraform modules repository
 5. `github__*` — read an example `.tf` file matching the requested resource type
 6. LLM generates `main.tf` + `variables.tf` using the example as a template
 7. **Terraform Evaluator** — 3 LLM judges (security, compliance, quality) each score 1–5
@@ -117,45 +140,50 @@ GET  /        →  UI (ui.html)
 10. `github__*` — push `variables.tf`
 11. `github__*` — open pull request with ticket context in the description
 12. `snow__*` — add work note to ticket with PR URL
-13. Evaluation scores + telemetry logged to Azure AI Foundry
+13. Evaluation scores logged to App Insights as traces (search `Eval:` in Transaction Search)
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `AZURE_OPENAI_ENDPOINT` | ✓ | Azure OpenAI endpoint |
-| `AZURE_OPENAI_DEPLOYMENT_NAME` | ✓ | Model deployment (e.g. `gpt-4.1`) |
-| `AZURE_OPENAI_USE_AZURE_AD` | | `true` (default) or `false` |
-| `AZURE_OPENAI_API_KEY` | | Required if `USE_AZURE_AD=false` |
-| `SNOW_MCP_COMMAND` | | ServiceNow MCP start command |
-| `SNOW_INSTANCE` | ✓ | e.g. `https://devXXXXXX.service-now.com` |
-| `SNOW_USER` | ✓ | ServiceNow username |
-| `SNOW_PASSWORD` | ✓ | ServiceNow password |
+| `AZURE_OPENAI_ENDPOINT` | ✓ | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | ✓ | Model deployment name (e.g. `gpt-4.1-nano`) |
+| `AZURE_OPENAI_USE_AZURE_AD` | | `true` (default) uses az login / MI; `false` uses API key |
+| `AZURE_OPENAI_API_KEY` | | Required only if `USE_AZURE_AD=false` |
+| `SERVICENOW_INSTANCE_URL` | ✓ | e.g. `https://devXXXXXX.service-now.com` |
+| `SERVICENOW_USERNAME` | ✓ | ServiceNow username |
+| `SERVICENOW_PASSWORD` | ✓ | ServiceNow password |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | ✓ | GitHub PAT (repo + workflow scopes) |
 | `GITHUB_ORG` | ✓ | GitHub org/user owning the Terraform repo |
-| `GITHUB_TERRAFORM_REPO` | | Terraform modules repo (default: `terraform-modules-demo`) |
-| `AZURE_MCP_SERVER_COMMAND` | ✓ | Full path to `npx @azure/mcp@latest server start` |
-| `AZURE_SUBSCRIPTION_ID` | ✓ | Azure subscription for resource checks |
-| `AZURE_SERVICE_BUS_NAMESPACE` | | ASB namespace for async mode (omit for sync) |
-| `AZURE_SERVICE_BUS_QUEUE` | | ASB queue name (default: `provision-requests`) |
-| `AZURE_STORAGE_ACCOUNT_NAME` | | Blob storage for job state (async mode) |
-| `AZURE_STORAGE_CONTAINER` | | Blob container (default: `provision-jobs`) |
-| `AZURE_AI_FOUNDRY_PROJECT` | | Foundry project connection string for telemetry |
-| `APPLICATIONINSIGHTS_CONNECTION_STRING` | | App Insights for OpenTelemetry traces |
+| `GITHUB_TERRAFORM_REPO` | | Terraform modules repo name (default: `terraform-modules-demo`) |
+| `SNOW_MCP_COMMAND` | | Override ServiceNow MCP start command |
+| `GITHUB_MCP_COMMAND` | | Override GitHub MCP start command |
+| `AZURE_MCP_SERVER_COMMAND` | ✓ | Full command to start Azure MCP server |
+| `AZURE_SUBSCRIPTION_ID` | ✓ | Azure subscription ID for resource inventory |
+| `AZURE_SERVICE_BUS_HOSTNAME` | | ASB namespace hostname — enables async mode |
+| `AZURE_SERVICE_BUS_QUEUE_NAME` | | ASB queue name (default: `provisioning-queue`) |
+| `AZURE_STORAGE_ACCOUNT_NAME` | | Blob storage account for job state (async mode) |
+| `AZURE_STORAGE_CONTAINER_NAME` | | Blob container (default: `runs`) |
+| `AZURE_CLIENT_ID` | | User-assigned MI client ID (set automatically by ACA) |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | | App Insights connection string for telemetry |
 
 ## Demo Terraform Repo
 
-The agent reads from [`natesanshreyas/terraform-modules-demo`](https://github.com/natesanshreyas/terraform-modules-demo) which contains:
+The agent needs a GitHub repository containing Terraform module definitions and usage examples. It uses these as few-shot context when generating new configurations.
 
+**Required structure:**
 ```
 modules/
-  resource-group/     main.tf, variables.tf
-  storage-account/    main.tf, variables.tf, outputs.tf
-  openai/             main.tf, variables.tf
+  <resource-type>/
+    main.tf
+    variables.tf
+    outputs.tf        (optional)
 examples/
-  storage-account-example/  main.tf  ← agent reads for few-shot context
-  openai-example/           main.tf
+  <resource-type>-example/
+    main.tf           ← agent reads this as a template
 ```
+
+You can fork the reference repo at [`natesanshreyas/terraform-modules-demo`](https://github.com/natesanshreyas/terraform-modules-demo) which includes modules for `resource-group`, `storage-account`, and `openai`. Set `GITHUB_ORG` and `GITHUB_TERRAFORM_REPO` to point at your fork/copy.
 
 ## File Structure
 
@@ -170,10 +198,22 @@ snow-terraform-agent/
 │   ├── asb_consumer.py         Azure Service Bus worker process
 │   ├── asb_sender.py           Enqueue messages to ASB
 │   ├── blob_store.py           Azure Blob state store for job tracking
-│   ├── telemetry.py            Azure AI Foundry + OpenTelemetry integration
+│   ├── telemetry.py            OpenTelemetry + App Insights integration
 │   ├── openai_client.py        Azure OpenAI wrapper with retry
 │   └── ui.html                 Browser UI
+├── infra/
+│   └── setup.sh                Full Azure infrastructure setup (az CLI)
+├── Dockerfile                  Multi-stage: Node 20 + Python 3.11
 ├── requirements.txt
-├── .env.example
-└── README.md
+└── .env.example
 ```
+
+## Known Limitations
+
+- **Blob storage status polling**: The `GET /api/provision/{run_id}/status` endpoint requires `AZURE_STORAGE_ACCOUNT_NAME`. In some Azure lab/sandbox subscriptions, Managed Identity blob writes may fail with 403 despite correct role assignments — this is a subscription-level policy issue. Evaluation scores and completion status are always available in App Insights Transaction Search (filter by `Eval:` or `provision_run`).
+
+- **KEDA autoscaler**: The ASB KEDA scaler requires a connection string secret that resolves at runtime. If it fails to fetch queue metrics, the worker still processes messages as long as `min-replicas ≥ 1`. Set `min-replicas=1` on the worker app as a workaround.
+
+- **Branch reuse**: If a provisioning run for a ticket ID fails after creating the GitHub branch, re-running the same ticket will hit a "Reference already exists" error. Delete the stale branch in GitHub before retrying.
+
+- **Foundry evaluation dashboard**: Azure AI Foundry project creation may be blocked by subscription policies (`publicNetworkAccess: Disabled`). Evaluation scores are logged to App Insights as an alternative — search `Eval:` in Transaction Search to see per-run scores.
