@@ -32,6 +32,9 @@ async def startup():
     if enabled:
         print("Azure Monitor telemetry enabled")
 
+    from .poller import start_poller
+    start_poller()
+
 
 # ---------------------------------------------------------------------------
 # Request / response models
