@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 import uuid
+
+logging.basicConfig(level=logging.INFO)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional

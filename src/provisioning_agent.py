@@ -75,11 +75,13 @@ Call a tool:
 Generate Terraform HCL (step 6 only):
 {"action":"generate_terraform","main_tf":"<HCL content>","variables_tf":"<HCL content>","reason":"<why>"}
 
-Ticket not approved:
-{"action":"blocked","reason":"<message>"}
+Ticket not approved (ONLY use this if approval field is not "approved"):
+{"action":"not_approved","reason":"<message>"}
 
-All done:
+All done (use this when PR is open and SNOW ticket is updated — include the real PR URL):
 {"action":"final","pr_url":"<url>","summary":"<1-2 sentences>","ticket_updated":true}
+
+IMPORTANT: When all steps are complete, ALWAYS use "final" with the PR URL. NEVER use "blocked", "block", or "not_approved" to signal completion.
 
 === EXACT TOOL NAMES ===
 ServiceNow (snow__ prefix):
@@ -350,10 +352,25 @@ def provision_from_ticket(
                 )
 
             # ── Blocked (not approved) ────────────────────────────────────
-            if action == "blocked":
-                raise ProvisioningError(
-                    f"Provisioning blocked: {decision.get('reason', 'ticket not approved')}"
-                )
+            if action in ("not_approved", "blocked", "block"):
+                reason = decision.get("reason", "ticket not approved")
+                # Guard against LLM using "blocked" to mean "done"
+                completion_words = ("complete", "done", "finish", "no further", "all step")
+                if any(w in reason.lower() for w in completion_words):
+                    logger.warning(
+                        "LLM used %r with completion language — nudging to return 'final'", action
+                    )
+                    messages.append({"role": "assistant", "content": json.dumps(decision)})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "It looks like all steps are complete. "
+                            "Return the final result using: "
+                            '{"action":"final","pr_url":"<the PR URL you just created>","summary":"<1-2 sentences>","ticket_updated":true}'
+                        ),
+                    })
+                    continue
+                raise ProvisioningError(f"Provisioning blocked: {reason}")
 
             # ── Terraform generation (LLM produces HCL, no tool call) ─────
             if action == "generate_terraform":
@@ -524,9 +541,18 @@ def provision_from_ticket(
                 )
                 continue
 
-            raise ProvisioningError(
-                f"LLM returned unrecognised action: {action!r}. "
-                f"Full response: {json.dumps(decision)[:400]}"
-            )
+            # Unknown action — nudge LLM back on track instead of hard-failing
+            logger.warning("Unrecognised action %r — prompting LLM to correct", action)
+            messages.append({"role": "assistant", "content": json.dumps(decision)})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Your response used action={action!r} which is not valid. "
+                    "Valid actions are: tool_call, generate_terraform, blocked, final. "
+                    "If all steps are complete and the PR is open, return "
+                    '{"action":"final","pr_url":"<url>","summary":"...","ticket_updated":true}.'
+                ),
+            })
+            continue
 
     raise ProvisioningError(f"No final result after {max_iterations} iterations")
