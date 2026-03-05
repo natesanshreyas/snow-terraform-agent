@@ -19,10 +19,13 @@ infrastructure provisioning from a ServiceNow ticket:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .multi_mcp_client import (
     MCPServerConfig,
@@ -315,6 +318,10 @@ def provision_from_ticket(
         # Evaluator state
         _terraform_eval_scores: Optional[Dict[str, Any]] = None
         _terraform_retries: int = 0
+        # Captured from real API responses — used to override LLM memory
+        _captured_sys_id: Optional[str] = None
+        _captured_pr_url: Optional[str] = None
+        _snow_ticket_updated: bool = False
 
         for i in range(1, max_iterations + 1):
             with _telemetry.Timer() as llm_timer:
@@ -342,8 +349,11 @@ def provision_from_ticket(
 
             # ── Final answer ──────────────────────────────────────────────
             if action == "final":
+                llm_pr_url = str(decision.get("pr_url", "")).strip()
+                # Prefer real captured URL over whatever the LLM remembers
+                pr_url = _captured_pr_url or llm_pr_url
                 return ProvisioningResult(
-                    pr_url=str(decision.get("pr_url", "")),
+                    pr_url=pr_url,
                     summary=str(decision.get("summary", "")),
                     ticket_updated=bool(decision.get("ticket_updated", False)),
                     iterations=i,
@@ -516,6 +526,45 @@ def provision_from_ticket(
                     success=True,
                 )
 
+                # ── Extract key state from real API responses ─────────────
+                # Capture sys_id from SNOW query result
+                if tool_name == "snow__SN-Query-Table" and not _captured_sys_id:
+                    m = re.search(r'"sys_id"\s*:\s*"([a-f0-9]{32})"', preview)
+                    if m:
+                        _captured_sys_id = m.group(1)
+                        logger.info("Captured sys_id=%s for ticket=%s", _captured_sys_id, ticket_id)
+
+                # Capture PR URL from GitHub PR creation result
+                if tool_name == "github__create_pull_request":
+                    m = re.search(r'https://github\.com/[^\s"\']+/pull/\d+', preview)
+                    if m:
+                        _captured_pr_url = m.group(0).rstrip(".,)")
+                        logger.info("Captured PR URL: %s", _captured_pr_url)
+
+                # Detect SNOW ticket update — inject real sys_id if LLM got it wrong
+                if tool_name == "snow__SN-Update-Record":
+                    _snow_ticket_updated = True
+
+                # ── Auto-complete: if we have PR URL and SNOW is updated, done ─
+                if _captured_pr_url and _snow_ticket_updated:
+                    logger.info("Auto-completing: PR=%s ticket_updated=True", _captured_pr_url)
+                    return ProvisioningResult(
+                        pr_url=_captured_pr_url,
+                        summary=(
+                            f"Provisioned resources for {ticket_id}. "
+                            f"PR ready for review: {_captured_pr_url}"
+                        ),
+                        ticket_updated=True,
+                        iterations=i,
+                        tool_calls=trace,
+                        eval_scores=_terraform_eval_scores,
+                    )
+
+                # Inject captured sys_id into next message so LLM uses the real value
+                sys_id_hint = ""
+                if _captured_sys_id:
+                    sys_id_hint = f" (sys_id for this ticket: {_captured_sys_id})"
+
                 messages.append(
                     {
                         "role": "assistant",
@@ -535,7 +584,7 @@ def provision_from_ticket(
                         "role": "user",
                         "content": (
                             f"Tool result ({tool_name}):\n{preview}\n"
-                            "Continue with the next step in the workflow."
+                            f"Continue with the next step in the workflow.{sys_id_hint}"
                         ),
                     }
                 )
