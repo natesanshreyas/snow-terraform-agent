@@ -152,13 +152,38 @@ GET  /health  →  {"status": "ok"}
 GET  /        →  browser UI
 ```
 
+## ServiceNow Business Rule Setup
+
+To trigger the agent automatically when a ticket is approved:
+
+1. In your ServiceNow instance → **System Definition → Business Rules → New**
+2. Set:
+   - **Table**: `sc_req_item [sc_req_item]`
+   - **When**: after update
+   - **Condition**: `current.approval == 'approved' && previous.approval != 'approved'`
+   - **Advanced** (Script):
+     ```javascript
+     var rm = new sn_ws.RESTMessageV2('ProvisioningAgent', 'trigger');
+     rm.setStringParameterNoEscape('ticket_id', current.number);
+     rm.execute();
+     ```
+3. Create the REST Message under **System Web Services → Outbound → REST Messages**:
+   - **Endpoint**: `https://<your-apim-hostname>/api/provision`
+   - **HTTP Method**: POST
+   - **Headers**: `Content-Type: application/json`
+   - **Body**: `{"ticket_id": "${ticket_id}"}`
+   - Add any APIM subscription key header if required
+
+The agent will be called with the RITM number, read the ticket, validate approval and cost center, then proceed with Terraform generation and PR creation — or write back to the ticket if blocked.
+
 ## Workflow
 
-1. `snow__*` — read ticket: extract `short_description`, `approval_state`, `cost_center`
-2. Validate `approval_state == "approved"` — returns `blocked` if not
+1. `snow__*` — read ticket: extract `short_description`, `approval`, `cost_center`
+2. **Approval gate** — if `approval != "approved"`: write blocking work note to ticket, return `blocked` status, stop
+3. **Cost center gate** — if no cost center found in description: write blocking work note, return `blocked` status, stop
 3. `azure__*` — list resource groups for naming context
-4. `github__*` — find the Terraform modules repository
-5. `github__*` — read an example `.tf` file matching the requested resource type
+4. `azure__*` — list resource groups for naming context
+5. `github__*` — find the Terraform modules repository and read an example `.tf` file
 6. LLM generates `main.tf` + `variables.tf` using the example as a template
 7. **Terraform Evaluator** — 3 LLM judges (security, compliance, quality) each score 1–5
    - All scores ≥ 3 → pass, continue to step 8

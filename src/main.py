@@ -64,6 +64,8 @@ class ProvisionResponse(BaseModel):
     iterations: int
     tool_calls: List[ToolCallResponse]
     eval_scores: Optional[Dict[str, Any]] = None
+    blocked: bool = False
+    blocked_reason: str = ""
 
 
 class ProvisionAcceptedResponse(BaseModel):
@@ -113,6 +115,10 @@ async def api_provision(request: ProvisionRequest, response: Response):
 
     ticket_id = request.ticket_id.strip()
 
+    # Register with the poller so it doesn't also process this ticket
+    from .poller import _seen_tickets
+    _seen_tickets.add(ticket_id)
+
     # ── Async mode: enqueue to Service Bus ───────────────────────────────────
     if _asb_enabled():
         from .asb_sender import send_provision_message
@@ -148,13 +154,12 @@ async def api_provision(request: ProvisionRequest, response: Response):
     try:
         settings = load_openai_settings()
         result = await asyncio.wait_for(
-            asyncio.to_thread(
-                provision_from_ticket,
+            provision_from_ticket(
                 openai_settings=settings,
                 ticket_id=ticket_id,
                 max_iterations=request.max_iterations,
             ),
-            timeout=300,
+            timeout=600,
         )
         track_provision_run(
             ticket_id=ticket_id,
@@ -179,6 +184,8 @@ async def api_provision(request: ProvisionRequest, response: Response):
                 for t in result.tool_calls
             ],
             eval_scores=result.eval_scores,
+            blocked=result.blocked,
+            blocked_reason=result.blocked_reason,
         )
     except asyncio.TimeoutError as exc:
         track_provision_run(ticket_id=ticket_id, success=False, iterations=0,
