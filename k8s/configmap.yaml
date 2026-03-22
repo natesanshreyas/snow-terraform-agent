@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: snow-terraform-agent-config
+  labels:
+    app: snow-terraform-agent
+data:
+  AZURE_OPENAI_ENDPOINT: "https://snate-mkpwns1j-eastus2.openai.azure.com/"
+  AZURE_OPENAI_DEPLOYMENT_NAME: "gpt-5.2-chat"
+  AZURE_OPENAI_API_VERSION: "2024-10-21"
+  AZURE_OPENAI_MODEL_NAME: "gpt-5.2-chat"
+  AZURE_OPENAI_USE_AZURE_AD: "true"
+  SERVICENOW_INSTANCE_URL: "https://dev353389.service-now.com"
+  SERVICENOW_USERNAME: "admin"
+  SNOW_MCP_COMMAND: "npx -y servicenow-mcp-server@latest"
+  GITHUB_MCP_COMMAND: "npx -y @modelcontextprotocol/server-github"
+  GITHUB_ORG: "natesanshreyas"
+  GITHUB_TERRAFORM_REPO: "terraform-modules-demo"
+  AZURE_SUBSCRIPTION_ID: "68837237-5a48-41a9-bed4-947f5c277684"
+  AZURE_CLIENT_ID: "a842e384-b53c-4dd8-a544-18f34fa76211"
+  AZURE_TENANT_ID: "f6d12728-e960-45d2-bf98-1421e9bc8453"
+  AZURE_MCP_SERVER_COMMAND: "npx -y @azure/mcp@latest server start"
+  APPLICATIONINSIGHTS_CONNECTION_STRING: "InstrumentationKey=8c4dad37-38b1-487f-bd45-7e3d37d43aff;IngestionEndpoint=https://eastus2-3.in.applicationinsights.azure.com/;LiveEndpoint=https://eastus2.livediagnostics.monitor.azure.com/;ApplicationId=ed49f243-c6f5-4165-b0fd-997cc1c42524"

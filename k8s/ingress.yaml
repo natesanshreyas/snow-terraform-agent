@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: snow-terraform-agent
+  labels:
+    app: snow-terraform-agent
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+    # Replace <DNS_LABEL> with the value from Terraform output: hostname
+    # Example: snow-agent.eastus2.cloudapp.azure.com
+    - host: <DNS_LABEL>.eastus2.cloudapp.azure.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: snow-terraform-agent
+                port:
+                  number: 80

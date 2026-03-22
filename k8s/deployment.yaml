@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snow-terraform-agent
+  labels:
+    app: snow-terraform-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: snow-terraform-agent
+  template:
+    metadata:
+      labels:
+        app: snow-terraform-agent
+    spec:
+      containers:
+        - name: snow-terraform-agent
+          # Replace <ACR_LOGIN_SERVER> with the value from Terraform output: acr_login_server
+          image: <ACR_LOGIN_SERVER>/snow-terraform-agent:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: snow-terraform-agent-config
+            - secretRef:
+                name: snow-terraform-agent-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
